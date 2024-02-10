@@ -15,6 +15,11 @@ jobs:
       with:
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
+    - run: nix-prefetch-url https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-28/fix-window-role.patch
+    - run: nix-prefetch-url https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-29/poll.patch
+    - run: nix-prefetch-url https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-29/round-undecorated-frame.patch
+    - run: nix-prefetch-url https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-28/system-appearance.patch
+
     - run: nix run nix-darwin -- --show-trace --flake "${PWD}#x86-darwin" build
     - run: nix run nix-darwin -- --show-trace --flake "${PWD}#x86-darwin" switch
     - run: which emacs
