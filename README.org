@@ -1,0 +1,293 @@
+#+title: Home Manager + restart-emacs
+
+Double-wrapping Emacs causes problems with accessing packages, native
+compilation, and restarting Emacs. This double-wrapping problem occurs when one
+uses the =with*= functions more than once when producing an Emacs.
+
+Home Manager uses =emacsPackagesFor= and =emacsWithPackages= to build a final
+package that shows up one's machine, and when one uses those same mechanisms to
+configure Emacs via Home Manager, double-wrapping will occur.
+
+I am only using Home Manager's options to configure Emacs, and running into
+issues with restarting Emacs, where I see an invocation directory that's missing
+the =with-packages= suffix added by the Emacs package provided by Nixpkgs.
+
+* Contents                                                              :TOC:
+- [[#restartemacs][=restart=emacs=]]
+- [[#home-manager][Home Manager]]
+- [[#emacs-wrapper][Emacs wrapper]]
+- [[#nix-store][Nix store]]
+  - [[#everything-emacs][Everything Emacs]]
+- [[#references][References]]
+
+* =restart=emacs=
+Emacs has the ability the restart itself via =restart-emacs=.
+
+#+begin_src emacs-lisp
+(defun restart-emacs ()
+  "Kill the current Emacs process and start a new one.
+This goes through the same shutdown procedure as
+`save-buffers-kill-emacs', but instead of killing Emacs and
+exiting, it re-executes Emacs (using the same command line
+arguments as the running Emacs)."
+  (interactive)
+  (save-buffers-kill-emacs nil t))
+#+end_src
+
+=save-buffers-kill-emacs= eventually calls =kill-emacs= with the =restart=
+argument. The lengthy implementation of =kill-emacs=, implemented in C, ultimately executes the original Emacs process by combining =initial_emacs_executable=.
+
+#+begin_src c
+DEFUN ("kill-emacs", Fkill_emacs, Skill_emacs, 0, 2, "P",
+       doc: /* Exit the Emacs job and kill it.
+If ARG is an integer, return ARG as the exit program code.
+If ARG is a string, stuff it as keyboard input.
+Any other value of ARG, or ARG omitted, means return an
+exit code that indicates successful program termination.
+
+If RESTART is non-nil, instead of just exiting at the end, start a new
+Emacs process, using the same command line arguments as the currently
+running Emacs process.
+
+This function is called upon receipt of the signals SIGTERM
+or SIGHUP, and upon SIGINT in batch mode.
+
+The value of `kill-emacs-hook', if not void, is a list of functions
+(of no args), all of which are called before Emacs is actually
+killed.  */
+       attributes: noreturn)
+  (Lisp_Object arg, Lisp_Object restart)
+{
+  int exit_code;
+
+#ifndef WINDOWSNT
+  /* Do some checking before shutting down Emacs, because errors
+     can't be meaningfully reported afterwards.  */
+  if (!NILP (restart))
+    {
+      /* This is very unlikely, but it's possible to execute a binary
+	 (on some systems) with no argv.  */
+      if (initial_argc < 1)
+	error ("No command line arguments known; unable to re-execute Emacs");
+
+      /* Check that the binary hasn't gone away.  */
+      if (!initial_emacs_executable)
+	error ("Unknown Emacs executable");
+
+      if (!file_access_p (initial_emacs_executable, F_OK))
+	error ("Emacs executable \"%s\" can't be found", initial_argv[0]);
+    }
+#endif
+
+#ifdef HAVE_LIBSYSTEMD
+  /* Notify systemd we are shutting down, but only if we have notified
+     it about startup.  */
+  if (daemon_type == -1)
+    sd_notify(0, "STOPPING=1");
+#endif /* HAVE_LIBSYSTEMD */
+
+  /* Fsignal calls emacs_abort () if it sees that waiting_for_input is
+     set.  */
+  waiting_for_input = 0;
+  if (!NILP (find_symbol_value (Qkill_emacs_hook)))
+    {
+      if (noninteractive)
+	safe_run_hooks (Qkill_emacs_hook);
+      else
+	call1 (Qrun_hook_query_error_with_timeout, Qkill_emacs_hook);
+    }
+
+#ifdef HAVE_X_WINDOWS
+  /* Transfer any clipboards we own to the clipboard manager.  */
+  x_clipboard_manager_save_all ();
+#endif
+
+  shut_down_emacs (0, (STRINGP (arg) && !feof (stdin)) ? arg : Qnil);
+
+#ifdef HAVE_NS
+  ns_release_autorelease_pool (ns_pool);
+#endif
+
+  /* If we have an auto-save list file,
+     kill it because we are exiting Emacs deliberately (not crashing).
+     Do it after shut_down_emacs, which does an auto-save.  */
+  if (STRINGP (Vauto_save_list_file_name))
+    {
+      Lisp_Object listfile;
+      listfile = Fexpand_file_name (Vauto_save_list_file_name, Qnil);
+      unlink (SSDATA (listfile));
+    }
+
+#ifdef HAVE_NATIVE_COMP
+  eln_load_path_final_clean_up ();
+#endif
+
+  if (!NILP (restart))
+    {
+      turn_on_atimers (false);
+#ifdef WINDOWSNT
+      if (w32_reexec_emacs (initial_cmdline, initial_wd) < 0)
+#else
+      initial_argv[0] = initial_emacs_executable;
+      if (execvp (*initial_argv, initial_argv) < 1)
+#endif
+	emacs_perror ("Unable to re-execute Emacs");
+    }
+
+  if (FIXNUMP (arg))
+    exit_code = (XFIXNUM (arg) < 0
+		 ? XFIXNUM (arg) | INT_MIN
+		 : XFIXNUM (arg) & INT_MAX);
+  else
+    exit_code = EXIT_SUCCESS;
+  exit (exit_code);
+}
+#+end_src
+
+* Home Manager
+When one manages their Emacs with Home Manager and Nix, it's necessary to wrap
+Emacs in order to install packages like =vterm= where compiling external
+dependencies causes issues.
+
+A minimal Emacs configuration with Home Manager might look like this:
+
+#+begin_src nix
+programs.emacs = {
+  enable = true;
+
+  package = pkgs.emacs-unstable-pgtk;
+
+  extraPackages = epkgs: [epkgs.vterm];
+
+  overrides = final: prev: {
+    # `emacs-28` patches are compatible with `emacs-29`.
+    #
+    # Where a compatible path exists, there is a symlink upstream to keep
+    # things clean, but GitHub doesn't follow symlinks to generate the
+    # responses we need (instead GitHub returns the target of the symlink).
+    patches =
+      (prev.patches or [])
+      ++ [
+        # Fix OS window role (needed for window managers like yabai)
+        (pkgs.fetchpatch {
+          url = "https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-28/fix-window-role.patch";
+          sha256 = "0c41rgpi19vr9ai740g09lka3nkjk48ppqyqdnncjrkfgvm2710z";
+        })
+        # Use poll instead of select to get file descriptors
+        (pkgs.fetchpatch {
+          url = "https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-29/poll.patch";
+          sha256 = "0j26n6yma4n5wh4klikza6bjnzrmz6zihgcsdx36pn3vbfnaqbh5";
+        })
+        # Enable rounded window with no decoration
+        (pkgs.fetchpatch {
+          url = "https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-29/round-undecorated-frame.patch";
+          sha256 = "0x187xvjakm2730d1wcqbz2sny07238mabh5d97fah4qal7zhlbl";
+        })
+        # Make Emacs aware of OS-level light/dark mode
+        (pkgs.fetchpatch {
+          url = "https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/patches/emacs-28/system-appearance.patch";
+          sha256 = "14ndp2fqqc95s70fwhpxq58y8qqj4gzvvffp77snm2xk76c1bvnn";
+        })
+      ];
+  };
+};
+#+end_src
+
+With this configuration, one can get their hands on the generated Emacs package
+(say for setting up aliases or automating addition to one's Dock on macOS) using
+Home Manager's configuration.
+
+#+begin_src nix
+config.home-manager.users.${username}.programs.emacs.finalPackage;
+#+end_src
+
+In my case that looks something like this:
+
+#+begin_example
+$ nix repl --extra-experimental-features 'flakes repl-flake' .
+nix-repl> darwinConfigurations.max.config.home-manager.users.jcf.programs.emacs.finalPackage.outPath
+#+end_example
+
+At the time of writing, my =outPath= is:
+
+#+name: emacs
+#+begin_example
+/nix/store/q9aj7679vid9l5hxlr5dm1bssgskrgxh-emacs-unstable-with-packages-29.2
+#+end_example
+
+* Emacs wrapper
+The package we've installed comes with a wrapper script that starts Emacs with
+things like packages and user configuration available.
+
+Looking at the generated wrapper script, the final =exec= uses an Emacs package
+without the =-with-packages= suffix.
+
+#+begin_src sh :var emacs=emacs :results output verbatim :wrap src sh :exports both
+tail -1 "$(tr -d "\n" <<< $emacs)/Applications/Emacs.app/Contents/MacOS/.Emacs-wrapped"
+#+end_src
+
+#+results:
+#+begin_src sh
+exec /nix/store/wmpm0b7avcdspqw4dhhb05dign2mwp4s-emacs-unstable-29.2/Applications/Emacs.app/Contents/MacOS/Emacs "$@"
+#+end_src
+
+The problem seems to be that this wrapper script launches a version of Emacs
+without the =-with-packages= suffix in the name.
+
+Emacs derivation out path:
+
+#+begin_example
+/nix/store/q9aj7679vid9l5hxlr5dm1bssgskrgxh-emacs-unstable-with-packages-29.2
+#+end_example
+
+In the wrapper script, we execute a different Emacs derivation:
+
+#+begin_example
+/nix/store/wmpm0b7avcdspqw4dhhb05dign2mwp4s-emacs-unstable-29.2
+#+end_example
+
+* Nix store
+** Everything Emacs
+#+begin_src sh :results output list :exports both
+fd --type directory --max-depth 1 'emacs-' /nix/store
+#+end_src
+
+#+results:
+#+begin_example
+- /nix/store/awnky7y0plbwqaq8hnmh8gcypzdwypzj-emacs-unstable-with-packages-29.2/
+- /nix/store/25a8ihlnwdalc7sr35mlzbrr4bgfbkna-emacs-28.2/
+- /nix/store/qjgpw70kwz140wrj7lk2pils9mnnfcac-emacs-vterm-20230417.424/
+- /nix/store/zjv8h8hiixkxvz60xsmr6ds1q2rih2b6-emacs-packages-deps/
+- /nix/store/xclpf9yyqzjfdwjbay17q85adiqmdwgj-emacs-vterm-20230417.424/
+- /nix/store/vs9w294n6gm0mqdy3l59qjhw0k2b42ks-emacs-unstable-29.2/
+- /nix/store/vlw849n0qpagqh0126d9mkyjz2l05mvw-emacs-packages-deps/
+- /nix/store/xj5b3ng8dwbfcp6dv4lnnqi1c7k4qavx-emacs-unstable-with-packages-29.1.90/
+- /nix/store/h9b1yj25ipw8wm8anm7fbi8rqc1w7vn9-emacs-unstable-29.1.90/
+- /nix/store/q9aj7679vid9l5hxlr5dm1bssgskrgxh-emacs-unstable-with-packages-29.2/
+- /nix/store/qhh1aa95id3jzqvxj169v61l4l7ycq72-emacs-unstable-29.2/
+- /nix/store/4iraqrh9ylgkasclhf1bdn6g1ax8yai5-emacs-vterm-20230417.424/
+- /nix/store/sfcz6812wwfl9l0060gf1l48176j1x75-emacs-vterm-20230417.424/
+- /nix/store/18xc5gqydknqwl6fz89c0dnvcf24d3wa-emacs-unstable-with-packages-29.1.90/
+- /nix/store/5f66cav1zv6xcdv8bblydm6az4whgfcx-emacs-packages-deps/
+- /nix/store/6g5hxdxllqv3xy6ih530hgh04yf8wmlp-emacs-packages-deps/
+- /nix/store/nax7zyq8hznfc8x66kamybrmidacvmk9-emacs-packages-deps/
+- /nix/store/vi4cr17hfz9l5b8x0k6qa521k33pn80r-emacs-unstable-with-packages-29.2/
+- /nix/store/wmpm0b7avcdspqw4dhhb05dign2mwp4s-emacs-unstable-29.2/
+- /nix/store/qijacydwqch29a3vzkcxmbcnqsak7j7c-emacs-packages-deps/
+- /nix/store/4d324ihqqh0yh54wszs7j0g2cjb5j8id-emacs-pgtk-29.1/
+- /nix/store/hjqjdcdwymvwl65x58y87zq7mdldinpr-emacs-unstable-with-packages-29.2/
+- /nix/store/plxbh95byi46aly8gsjk2yrnykx5whxj-emacs-vterm-20230417.424/
+- /nix/store/n36m91f7mg2sb6ja93impyvlcxxk7zw7-emacs-packages-deps/
+- /nix/store/zw9j2zm4gbbqynwasaaf2vc8jvzl0rp8-emacs-unstable-29.1.90/
+- /nix/store/cxd0vqwxjkrr5d1s2s72kygkxkjh3pcn-emacs-vterm-20230417.424/
+- /nix/store/50ngyajnf7zk6cj9b4r7648dhy1kdvvq-emacs-unstable-with-packages-with-packages-29.2/
+- /nix/store/l80jsxbmgvqvjzbg656mxvzj8lp3vla2-emacs-pgtk-with-packages-29.1/
+- /nix/store/r30zr2df02is7qk4g7lnzlsmfkzwsbpj-emacs-unstable-with-packages-29.2/
+#+end_example
+
+* References
+- https://github.com/NixOS/nixpkgs/issues/145302
+- https://github.com/NixOS/nixpkgs/issues/267548#issuecomment-1833505396
+- https://github.com/nix-community/emacs-overlay/issues/386
+- https://github.com/nix-community/emacs-overlay/issues/388#issuecomment-1933320497
+- https://github.com/progfolio/elpaca/issues/251#issuecomment-1933386074
