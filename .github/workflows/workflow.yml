@@ -16,3 +16,5 @@ jobs:
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
     - run: nix run nix-darwin -- --show-trace --flake "${PWD}#x86-darwin" build
+    - run: nix run nix-darwin -- --show-trace --flake "${PWD}#x86-darwin" switch
+    - run: which emacs
