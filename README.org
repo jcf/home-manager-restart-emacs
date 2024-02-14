@@ -1,16 +1,17 @@
 #+title: Home Manager + restart-emacs
+#+startup: content
 
-Double-wrapping Emacs causes problems with accessing packages, native
-compilation, and restarting Emacs. This double-wrapping problem occurs when one
-uses the =with*= functions more than once when producing an Emacs.
+Double-wrapping Emacs causes problems accessing packages, native compilation,
+and restarting Emacs. This double-wrapping problem occurs when one uses the
+=with*= functions more than once when producing an Emacs derivation.
 
 Home Manager uses =emacsPackagesFor= and =emacsWithPackages= to build a final
-package that shows up one's machine, and when one uses those same mechanisms to
-configure Emacs via Home Manager, double-wrapping will occur.
+package that shows up on one's machine, and when one uses those same mechanisms
+to configure Emacs via Home Manager, double-wrapping will occur.
 
-I am only using Home Manager's options to configure Emacs, and running into
-issues with restarting Emacs, where I see an invocation directory that's missing
-the =with-packages= suffix added by the Emacs package provided by Nixpkgs.
+I am only using Home Manager's options to configure Emacs and running into
+issues when restarting, where I see an invocation directory missing the
+=with-packages= suffix.
 
 * Contents                                                              :TOC:
 - [[#restartemacs][=restart=emacs=]]
@@ -35,7 +36,9 @@ arguments as the running Emacs)."
 #+end_src
 
 =save-buffers-kill-emacs= eventually calls =kill-emacs= with the =restart=
-argument. The lengthy implementation of =kill-emacs=, implemented in C, ultimately executes the original Emacs process by combining =initial_emacs_executable=.
+argument. The lengthy implementation of =kill-emacs=, implemented in C,
+ultimately executes the original Emacs process by combining
+=initial_emacs_executable=.
 
 #+begin_src c
 DEFUN ("kill-emacs", Fkill_emacs, Skill_emacs, 0, 2, "P",
@@ -145,9 +148,9 @@ killed.  */
 #+end_src
 
 * Home Manager
-When one manages their Emacs with Home Manager and Nix, it's necessary to wrap
-Emacs in order to install packages like =vterm= where compiling external
-dependencies causes issues.
+When one manages one's Emacs with Home Manager and Nix, it's necessary to wrap
+Emacs to install packages like =vterm= where compiling external dependencies
+causes issues.
 
 A minimal Emacs configuration with Home Manager might look like this:
 
@@ -201,7 +204,7 @@ Home Manager's configuration.
 config.home-manager.users.${username}.programs.emacs.finalPackage;
 #+end_src
 
-In my case that looks something like this:
+In my case, that looks something like this:
 
 #+begin_example
 $ nix repl --extra-experimental-features 'flakes repl-flake' .
